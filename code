@@ -1,0 +1,852 @@
+import pygame
+import random
+import sqlite3
+import sys
+import time
+
+
+pygame.init()
+SCREEN_WIDTH, SCREEN_HEIGHT = 800, 600
+SCREEN = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+try:
+    BACKGROUND_IMAGE = pygame.image.load("background.png")
+    BACKGROUND_IMAGE = pygame.transform.scale(BACKGROUND_IMAGE,(SCREEN_WIDTH,SCREEN_HEIGHT))
+except Exception as e:
+    BACKGROUND_IMAGE = None
+    print(f"Error{e}")
+
+pygame.mixer.init()
+MUSIC_PATH = "found_you_-_andynope.mp3"
+MOVE_PATH = "tapping sfx4_2.wav"
+WIN_PATH = "videoplayback.wav"
+LOSE_PATH = "bruh.wav"
+
+BACKGROUND_MUSIC = None
+MOVE_SOUND = None
+WIN_SOUND = None
+LOSE_SOUND = None
+
+try:
+    BACKGROUND_MUSIC = MUSIC_PATH
+    MOVE_SOUND = pygame.mixer.Sound(MOVE_PATH)
+    WIN_SOUND = pygame.mixer.Sound(WIN_PATH)
+    LOSE_SOUND = pygame.mixer.Sound(LOSE_PATH)
+
+    if MOVE_SOUND:
+        MOVE_SOUND.set_volume(0.5)
+
+except pygame.error as e:
+    print(f"LỖI ÂM THANH|Chi tiết {e}")
+
+HISTORY_FILE = "history.db"
+
+
+def create_database():
+    import os
+    # Xóa file database cũ nếu tồn tại
+    if os.path.exists(HISTORY_FILE):
+        os.remove(HISTORY_FILE)
+
+    conn = sqlite3.connect(HISTORY_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+         CREATE TABLE IF NOT EXISTS game_history(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            player1_name TEXT,
+            player2_name TEXT,
+            time TEXT,
+            steps INTEGER,
+            result TEXT,
+            winner TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+create_database()
+pygame.display.set_caption("Gomoku Board")
+
+# Color
+CHARTREUSE  = (127,255,0)
+WHITE = (255, 255, 255)
+BLACK  = (0, 0, 0)
+GRAY = (50, 50, 50)
+COLOR_DISABLED = (100, 100, 100)
+DARK_SLATE = (47, 79, 79)
+RED = (255, 0, 0)
+GREEN = (0, 255, 0)
+BLUE = (0, 0, 255)
+YELLOW = (255, 255, 0)
+
+# Font
+# Press Start 2P Font - classic pixel
+try:
+    # Press Start 2P thường nhỏ hơn các font khác
+    FONT_LARGE = pygame.font.Font("PressStart2P.ttf", 36)    # Title
+    FONT_MEDIUM = pygame.font.Font("PressStart2P.ttf", 24)   # Text thường
+    FONT_SMALL = pygame.font.Font("PressStart2P.ttf", 18)    # Text nhỏ
+    print("✅ Đã load Press Start 2P font")
+except Exception as e:
+    print(f"❌ Lỗi load font: {e}")
+    # Fallback
+    FONT_LARGE = pygame.font.SysFont("courier", 36, bold=True)
+    FONT_MEDIUM = pygame.font.SysFont("courier", 24, bold=True)
+    FONT_SMALL = pygame.font.SysFont("courier", 18, bold=True)
+# Board size
+GRID_SIZE = 3
+selected_sized = 3
+CELL_SIZE = 150
+GRID_START_X = (SCREEN_WIDTH - GRID_SIZE * CELL_SIZE) // 2
+GRID_START_Y = (SCREEN_HEIGHT - GRID_SIZE * CELL_SIZE) // 2
+
+# Game status
+MENU_SCREEN = 0
+SETUP_SCREEN = 1
+DIFFICULTY_SCREEN = 2
+GAME_SCREEN = 3
+END_SCREEN = 4
+HISTORY_SCREEN = 5
+
+# Game variable
+game_states = MENU_SCREEN
+current_difficulty = 'Hard'
+player_name = ""
+player_name_2 = ""
+is_two_player = False
+board = [['' for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
+current_player = 'X'
+move_counts = 0
+game_result = ""
+
+
+# Game logic
+def check_win(board, player):
+    # Ngang va doc
+    for i in range(GRID_SIZE):
+        if all(board[i][j] == player for j in range(GRID_SIZE)):
+            return True
+        if all(board[j][i] == player for j in range(GRID_SIZE)):
+            return True
+
+    # Cheo chinh va phu
+    if all(board[i][i] == player for i in range(GRID_SIZE)):
+        return True
+    if all(board[i][GRID_SIZE - 1 - i] == player for i in range(GRID_SIZE)):
+        return True
+    return False
+
+
+def is_board_full(board):
+    # Hoa
+    return all(board[r][c] != '' for r in range(GRID_SIZE) for c in range(GRID_SIZE))
+
+
+def reset_game():
+    # Thiet lap game moi
+    global board, current_player, move_counts, game_result
+    board = [['' for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
+    current_player = 'X'
+    move_counts = 0
+    game_result = ""
+
+
+def save_history(player1_name, player2_name, result, steps, winner=""):
+    timestamp = time.strftime("%d-%m-%Y %H:%M:%S")
+    conn = sqlite3.connect(HISTORY_FILE)
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO game_history (player1_name, player2_name, time, steps, result, winner)
+        VALUES (?,?,?,?,?,?)
+    ''', (player1_name, player2_name, timestamp, steps, result, winner))
+    conn.commit()
+    conn.close()
+
+
+def load_history():
+    conn = sqlite3.connect(HISTORY_FILE)
+    cursor = conn.cursor()
+    cursor.execute('SELECT player1_name, player2_name, time, steps, result, winner FROM game_history')
+    rows = cursor.fetchall()
+    conn.close()
+    return rows
+
+
+def delete_history():
+    conn = sqlite3.connect(HISTORY_FILE)
+    cursor = conn.cursor()
+    cursor.execute('Delete FROM game_history')
+    conn.commit()
+    conn.close()
+    print("All the history has been deleted")
+
+
+# --- AI Logic ---
+WIN_SCORE = 100000
+MAX_DEPTH3X3 = 9
+MAX_DEPTH5X5 = 4
+
+
+def minimax(board, depth, is_maximizing_player, alpha, beta):
+    # Kiem tra dieu kien dung
+    if check_win(board, 'O'):
+        return WIN_SCORE - depth
+    if check_win(board, 'X'):
+        return -WIN_SCORE + depth
+    if is_board_full(board):
+        return 0
+    # Gioi han do sau tim kiem
+    if GRID_SIZE == 5 and depth >= MAX_DEPTH5X5:
+        return 0
+    elif GRID_SIZE == 3 and depth >= MAX_DEPTH3X3:
+        return 0
+    # Tim o co trong
+    empty_cells = [(r, c) for r in range(GRID_SIZE) for c in range(GRID_SIZE) if board[r][c] == '']
+
+    # Luot cua max (AI - O)
+    if is_maximizing_player:
+        max_eval = -float("inf")
+        for r, c in empty_cells:
+            board[r][c] = 'O'
+            # Goi de quy
+            eval = minimax(board, depth + 1, False, alpha, beta)
+            # Hoan tac nuoc di
+            board[r][c] = ''
+
+            max_eval = max(max_eval, eval)
+            alpha = max(alpha, max_eval)
+
+            # Cat tia alpha-beta
+            if beta <= alpha:
+                break
+        return max_eval
+
+    # Luot cua min (nguoi choi - X)
+    else:
+        min_eval = float('inf')
+        for r, c in empty_cells:
+            board[r][c] = 'X'
+            # Goi de quy
+            eval = minimax(board, depth + 1, True, alpha, beta)
+            # Hoan tac nuoc di
+            board[r][c] = ''
+
+            min_eval = min(min_eval, eval)
+            beta = min(beta, min_eval)
+
+            # Cat tia alpha-beta
+            if beta <= alpha:
+                break
+        return min_eval
+
+
+def ai_move_random(board):
+    empty_cells = [(r, c) for r in range(GRID_SIZE) for c in range(GRID_SIZE) if board[r][c] == '']
+    if empty_cells:
+        r, c = random.choice(empty_cells)
+        return r, c
+    return None
+
+
+def ai_smart_move_minimax(board):
+    best_score = -float('inf')
+    best_move = None
+
+    empty_cells = [(r, c) for r in range(GRID_SIZE) for c in range(GRID_SIZE) if board[r][c] == '']
+    # Neu khong con o trong , tra ve none
+    if not empty_cells:
+        return None
+
+    # Duyet qua tat ca nuoc di co the va tim nuoc di tot nhat
+    for r, c in empty_cells:
+        # Thuc hien nuoc di (AI - O)
+        board[r][c] = 'O'
+        # Goi minimax (luot tiep theo la min)
+        # bat dau voi alpha = -inf va beta = +inf
+        score = minimax(board, 0, False, -float('inf'), float('inf'))
+
+        # Hoan tac nuoc di
+        board[r][c] = ''
+        # Cap nhat nuoc di tot nhat
+        if score > best_score:
+            best_score = score
+            best_move = r, c
+    # Tra ve nuoc di tot nhat
+    return best_move
+
+
+def ai_smart_move(board):
+    global current_difficulty
+    if current_difficulty == 'Easy':
+        return ai_move_random(board)
+    else:
+        return ai_smart_move_minimax(board)
+
+
+# ----- Drawing -----
+# --- Man hinh 1: Ten game va "Press space to play" ---
+def draw_menu_screen():
+    if BACKGROUND_IMAGE:
+        SCREEN.blit(BACKGROUND_IMAGE, (0, 0))
+    else:
+        SCREEN.fill(DARK_SLATE)
+    try:
+        TITLE_FONT = pygame.font.Font("PressStart2P.ttf", 70)# Title lớn
+        SPACE_FONT = pygame.font.Font("PressStart2P.ttf", 15)
+
+    except:
+        TITLE_FONT = pygame.font.SysFont("courier", 60, bold=True)
+        SPACE_FONT = pygame.font.SysFont("courier", 15)
+    title = TITLE_FONT.render("TicTacToe", True, CHARTREUSE  )
+    title_rect = title.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 50))
+    SCREEN.blit(title, title_rect)
+
+    prompt = SPACE_FONT.render("Press space to begin", True, CHARTREUSE  )
+    prompt_rect = prompt.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 50))
+    SCREEN.blit(prompt, prompt_rect)
+
+
+# --- Man hinh 2:luat choi,nhap ten,lua chon kich thuoc ban co ---
+def draw_setup_screen(input_box_color):
+    if BACKGROUND_IMAGE:
+        SCREEN.blit(BACKGROUND_IMAGE, (0, 0))
+    else:
+        SCREEN.fill(DARK_SLATE)
+
+    mode_label = FONT_MEDIUM.render("MODE", True, CHARTREUSE  )
+    SCREEN.blit(mode_label, (50, 100))
+
+    # Nut 1 player
+    button_1_player = pygame.Rect(350, 100, 150, 40)
+    # Highlight nut duoc chon
+    color_1p = CHARTREUSE if not is_two_player else GRAY
+    pygame.draw.rect(SCREEN, color_1p, button_1_player)
+    text_1p = FONT_SMALL.render("1 player", True, BLACK )
+    SCREEN.blit(text_1p, text_1p.get_rect(center=button_1_player.center))
+
+    # Nut 2 player
+    button_2_players = pygame.Rect(550, 100, 150, 40)
+    color_2p = CHARTREUSE if is_two_player else GRAY
+    pygame.draw.rect(SCREEN, color_2p, button_2_players)
+    text_2p = FONT_SMALL.render("2 player", True, BLACK )
+    SCREEN.blit(text_2p, text_2p.get_rect(center=button_2_players.center))
+
+    # ---- Player 1
+    name_label_1 = FONT_MEDIUM.render("NAME(X)", True, CHARTREUSE  )
+    SCREEN.blit(name_label_1, (50, 200))
+
+    input_box_1 = pygame.Rect(350, 200, 350, 40)
+    pygame.draw.rect(SCREEN, input_box_color, input_box_1, 2)
+    text_surface_1 = FONT_MEDIUM.render(player_name, True, CHARTREUSE  )
+    SCREEN.blit(text_surface_1, (input_box_1.x + 5, input_box_1.y + 5))
+
+    # ---- Player 2
+    name_label_2 = FONT_MEDIUM.render("NAME(O) ", True, CHARTREUSE  )
+    SCREEN.blit(name_label_2, (50, 250))
+
+    input_box_2 = pygame.Rect(350, 250, 350, 40)
+    input_box_2_color = input_box_color if is_two_player else COLOR_DISABLED
+    pygame.draw.rect(SCREEN, input_box_2_color, input_box_2, 2)
+
+    # Neu la 1 player , hien thi ten AI hoac trong
+    display_name_2 = player_name_2 if is_two_player else "Computer(O)"
+    text_surface_2_color = CHARTREUSE   if is_two_player else COLOR_DISABLED
+    text_surface_2 = FONT_MEDIUM.render(display_name_2, True, text_surface_2_color)
+    SCREEN.blit(text_surface_2, (input_box_2.x + 5, input_box_2.y + 5))
+
+    # Nut chon kich thuoc ban co
+    size_label = FONT_MEDIUM.render("SIZE", True, CHARTREUSE  )
+    SCREEN.blit(size_label, (50, 350))
+
+    # Nut 3x3
+    button_3x3 = pygame.Rect(350, 350, 150, 50)
+    pygame.draw.rect(SCREEN, CHARTREUSE, button_3x3)
+    text_3x3 = FONT_MEDIUM.render("3x3", True, BLACK)
+    text_rect_3x3 = text_3x3.get_rect(center=button_3x3.center)
+    SCREEN.blit(text_3x3, text_rect_3x3)
+
+    # Nut 5x5
+    button_5x5 = pygame.Rect(550, 350, 150, 50)
+    pygame.draw.rect(SCREEN, CHARTREUSE, button_5x5)
+    text_5x5 = FONT_MEDIUM.render("5x5", True, BLACK )
+    text_rext_5x5 = text_5x5.get_rect(center=button_5x5.center)
+    SCREEN.blit(text_5x5, text_rext_5x5)
+
+    return button_3x3, button_5x5, input_box_1, input_box_2, button_1_player, button_2_players
+
+
+# --- Man 3: Do kho ---
+def draw_difficulty_screen():
+    if BACKGROUND_IMAGE:
+        SCREEN.blit(BACKGROUND_IMAGE, (0, 0))
+    else:
+        SCREEN.fill(DARK_SLATE)
+
+    try:
+        SELECT_FONT = pygame.font.Font("PressStart2P.ttf", 40)
+        ESC_FONT = pygame.font.Font("PressStart2P.ttf", 15)
+
+    except:
+        SELECT_FONT = pygame.font.SysFont("courier", 40, bold=True)
+        ESC_FONT = pygame.font.SysFont("courier", 15)
+
+    title = SELECT_FONT.render("Select AI Difficulty", True, CHARTREUSE  )
+    SCREEN.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 150)))
+    # Button easy
+    button_easy = pygame.Rect(150, 300, 200, 60)
+    color_easy = CHARTREUSE
+    pygame.draw.rect(SCREEN, color_easy, button_easy)
+    text_easy = FONT_MEDIUM.render("Easy", True, BLACK )
+    SCREEN.blit(text_easy, text_easy.get_rect(center=button_easy.center))
+
+    # Button hard
+    button_hard = pygame.Rect(450, 300, 200, 60)
+    color_hard = CHARTREUSE
+    pygame.draw.rect(SCREEN, color_hard, button_hard)
+    text_hard = FONT_MEDIUM.render("Hard", True, BLACK )
+    SCREEN.blit(text_hard, text_hard.get_rect(center=button_hard.center))
+
+    # Nut quay lai
+    esc_label = ESC_FONT.render("ESC:return", True, CHARTREUSE)
+    SCREEN.blit(esc_label, (20,570))
+
+    return button_easy, button_hard
+
+
+# --- Man 4: ve ban co ---
+def draw_game_screen(board):
+    if BACKGROUND_IMAGE:
+        SCREEN.blit(BACKGROUND_IMAGE, (0, 0))
+    else:
+        SCREEN.fill(DARK_SLATE)
+
+    # Xác định màu sắc cho tên người chơi
+    if current_player == 'X':
+        # Player X sáng, Player O mờ
+        name_x_color =  CHARTREUSE # Màu sáng cho người đang lượt
+        name_o_color = GRAY  # Màu mờ cho người không lượt
+    else:
+        # Player O sáng, Player X mờ
+        name_x_color = GRAY  # Màu mờ cho người không lượt
+        name_o_color =  CHARTREUSE  # Màu sáng cho người đang lượt
+
+    # Ten nguoi choi X - với màu tùy theo lượt
+    name_x = FONT_SMALL.render(f"(X){player_name}", True, name_x_color)
+    SCREEN.blit(name_x, (10, 10))
+
+    # Ten nguoi choi O - với màu tùy theo lượt
+    name_o_display = player_name_2 if is_two_player else "Computer"
+    name_o = FONT_SMALL.render(f"(O){name_o_display}", True, name_o_color)
+    SCREEN.blit(name_o, (600, 10))
+
+    # Ve luoi
+    for i in range(GRID_SIZE + 1):
+        # Hang doc
+        pygame.draw.line(SCREEN,CHARTREUSE, (GRID_START_X + i * CELL_SIZE, GRID_START_Y),
+                         (GRID_START_X + i * CELL_SIZE, GRID_START_Y + GRID_SIZE * CELL_SIZE), 3)
+        # Hang ngang
+        pygame.draw.line(SCREEN, CHARTREUSE, (GRID_START_X, GRID_START_Y + i * CELL_SIZE),
+                         (GRID_START_X + GRID_SIZE * CELL_SIZE, GRID_START_Y + i * CELL_SIZE), 3)
+
+    # Ve X/O
+    for r in range(GRID_SIZE):
+        for c in range(GRID_SIZE):
+            center_x = GRID_START_X + c * CELL_SIZE + CELL_SIZE // 2
+            center_y = GRID_START_Y + r * CELL_SIZE + CELL_SIZE // 2
+            if board[r][c] == 'X':
+                pygame.draw.line(SCREEN, CHARTREUSE, (center_x - 50, center_y - 50), (center_x + 50, center_y + 50), 5)
+                pygame.draw.line(SCREEN, CHARTREUSE, (center_x + 50, center_y - 50), (center_x - 50, center_y + 50), 5)
+            elif board[r][c] == 'O':
+                pygame.draw.circle(SCREEN, CHARTREUSE, (center_x, center_y), 50, 5)
+
+
+# --- Man hinh ket thuc va lua chon ---
+def draw_end_screen():
+    if BACKGROUND_IMAGE:
+        SCREEN.blit(BACKGROUND_IMAGE, (0, 0))
+    else:
+        SCREEN.fill(DARK_SLATE)
+
+    try:
+        RESULT_FONT = pygame.font.Font("PressStart2P.ttf", 80)  # Font rất lớn cho kết quả
+        OPTION_FONT = pygame.font.Font("PressStart2P.ttf", 10)  # Font nhỏ cho options
+    except:
+        RESULT_FONT = pygame.font.SysFont("courier", 80, bold=True)
+        OPTION_FONT = pygame.font.SysFont("courier", 10, bold=True)
+
+    winner_name = ""
+    if is_two_player:
+        # Chế độ 2 players
+        if game_result == "Win":
+            winner_name = player_name if current_player == 'X' else (player_name_2 if player_name_2 else "Player 2")
+            text = RESULT_FONT.render(f"{winner_name} WIN!", True, CHARTREUSE  )
+        elif game_result == "Draw":
+            text = RESULT_FONT.render("DRAW!", True, CHARTREUSE  )
+        else:
+            text = RESULT_FONT.render("GAME OVER!", True, CHARTREUSE  )
+    else:
+        # Chế độ 1 player (vs AI)
+        if game_result == "Win":
+            text = RESULT_FONT.render("WIN!", True, CHARTREUSE  )
+        elif game_result == "Lose":
+            text = RESULT_FONT.render("LOSE!", True, CHARTREUSE  )
+        elif game_result == "Draw":
+            text = RESULT_FONT.render("DRAW!", True, CHARTREUSE  )
+        else:
+            text = RESULT_FONT.render("GAME OVER!", True, CHARTREUSE  )
+
+    text_rect = text.get_rect(center=(SCREEN_WIDTH / 2 + 30, SCREEN_HEIGHT / 2 - 100))
+    SCREEN.blit(text, text_rect)
+
+    # 1.Option: Choi lai(space)
+    option_play = OPTION_FONT.render("(SPACE)replay", True, CHARTREUSE  )
+    SCREEN.blit(option_play, option_play.get_rect(center=(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2)))
+
+    # 2.Option: xem lich su(R)
+    option_history = OPTION_FONT.render("(R)review", True, CHARTREUSE  )
+    SCREEN.blit(option_history, option_history.get_rect(center=(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 60)))
+
+    # 3.Option: Quay lai menu(S)
+    option_setup = OPTION_FONT.render("(S)return", True, CHARTREUSE  )
+    SCREEN.blit(option_setup, option_setup.get_rect(center=(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 120)))
+
+    # 4.Option: Chon do kho(D) - chi khi la 1p
+    if not is_two_player:
+        difficulty_text = f"(D)difficulty"
+        option_difficulty = OPTION_FONT.render(difficulty_text, True, CHARTREUSE  )
+        SCREEN.blit(option_difficulty, option_difficulty.get_rect(center=(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 180)))
+
+
+# --- Ve man hinh lich su ---
+def draw_history_screen():
+    if BACKGROUND_IMAGE:
+        SCREEN.blit(BACKGROUND_IMAGE, (0, 0))
+    else:
+        SCREEN.fill(DARK_SLATE)
+    history = load_history()
+
+    # Font nhỏ hơn
+    try:
+        HISTORY_TEXT_FONT = pygame.font.Font("PressStart2P.ttf", 50)
+        HISTORY_FONT = pygame.font.Font("PressStart2P.ttf", 12)
+        ESC_FONT = pygame.font.Font("PressStart2P.ttf", 10) # Font rất nhỏ
+    except:
+        HISTORY_TEXT_FONT = pygame.font.SysFont("courier", 50, bold=True)
+        HISTORY_FONT = pygame.font.SysFont("courier", 12, bold=True)
+        ESC_FONT = pygame.font.SysFont("courier", 10, bold=True)
+
+    title = HISTORY_TEXT_FONT.render("HISTORY", True,CHARTREUSE )  # Title vừa phải
+    SCREEN.blit(title, title.get_rect(center=(SCREEN_WIDTH // 2, 40)))
+
+    # Headers với font nhỏ
+    headers = ["Player", "Result", "Time", "Steps"]
+    x_start = [50, 250, 400, 700]
+
+    for i, header in enumerate(headers):
+        header_surf = HISTORY_FONT.render(header, True,CHARTREUSE )
+        SCREEN.blit(header_surf, (x_start[i], 80))
+
+    y_offset = 110
+    prev_game_type = None
+
+    # Hiển thị tất cả lịch sử
+    for row in history[::-1]:  # Hiển thị từ mới đến cũ
+        player1 = row[0] if row[0] else "Player 1"
+        player2 = row[1] if row[1] else "Player 2"
+        result = row[4] if row[4] else "Unknown"
+        time_str = row[2] if row[2] else "N/A"
+        steps = str(row[3]) if row[3] else "0"
+
+        # Xác định loại game (1 player hay 2 players)
+        current_game_type = "2P" if player2 != "Computer" else "1P"
+
+        # Thêm dòng trống nếu khác loại game với game trước đó
+        if prev_game_type and prev_game_type != current_game_type:
+            y_offset += 20  # Khoảng cách giữa các loại game
+
+        prev_game_type = current_game_type
+
+        # Xác định màu cho result
+        if result == "Win":
+            result_color = GREEN
+        elif result == "Lose":
+            result_color = RED
+        elif result == "Draw":
+            result_color = YELLOW
+        else:
+            result_color = WHITE
+
+        # Hiển thị Player 1
+        player1_text = f"{player1} (1P)" if current_game_type == "1P" else f"{player1} (P1)"
+        player1_surf = HISTORY_FONT.render(player1_text, True, WHITE)
+        result1_surf = HISTORY_FONT.render(result, True, result_color)
+        time_surf = HISTORY_FONT.render(time_str, True, WHITE)
+        steps_surf = HISTORY_FONT.render(steps, True, WHITE)
+
+        SCREEN.blit(player1_surf, (x_start[0], y_offset))
+        SCREEN.blit(result1_surf, (x_start[1], y_offset))
+        SCREEN.blit(time_surf, (x_start[2], y_offset))
+        SCREEN.blit(steps_surf, (x_start[3], y_offset))
+
+        y_offset += 20
+
+        # Nếu là 2 players, hiển thị thêm Player 2 với kết quả ngược lại
+        if current_game_type == "2P":
+            if result == "Win":
+                player2_result = "Lose"
+                result2_color = RED
+            elif result == "Lose":
+                player2_result = "Win"
+                result2_color = GREEN
+            else:  # Draw
+                player2_result = "Draw"
+                result2_color = YELLOW
+
+            player2_text = f"{player2} (P2)"
+            player2_surf = HISTORY_FONT.render(player2_text, True, WHITE)
+            result2_surf = HISTORY_FONT.render(player2_result, True, result2_color)
+
+            SCREEN.blit(player2_surf, (x_start[0], y_offset))
+            SCREEN.blit(result2_surf, (x_start[1], y_offset))
+            # Time và Steps để trống cho dòng thứ 2
+            SCREEN.blit(time_surf, (x_start[2], y_offset))
+            SCREEN.blit(steps_surf, (x_start[3], y_offset))
+
+            y_offset += 20
+
+        # Thêm khoảng cách sau mỗi game
+        y_offset += 10
+
+        if y_offset > SCREEN_HEIGHT - 50:
+            break
+
+    # Nut quay lai
+    esc_label = ESC_FONT.render("ESC:return", True, CHARTREUSE)
+    SCREEN.blit(esc_label, (20, 550))
+
+# ----- Vong lap chinh cua game -----
+running = True
+input_active = False
+active_box = None
+input_color_inactive = GRAY
+input_color_active = CHARTREUSE  
+input_box_color = input_color_inactive
+if BACKGROUND_MUSIC and pygame.mixer.get_init():
+    pygame.mixer.music.load(BACKGROUND_MUSIC)
+    pygame.mixer.music.play(-1)
+    pygame.mixer.music.set_volume(0.3)
+
+while running:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            delete_history()
+            running = False
+
+        elif game_states == MENU_SCREEN:
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:
+                game_states = SETUP_SCREEN
+
+        elif game_states == SETUP_SCREEN:
+            button_3x3, button_5x5, input_box_1, input_box_2, button_1_player, button_2_players = draw_setup_screen(
+                input_box_color)
+
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if button_1_player.collidepoint(event.pos):
+                    is_two_player = False
+                    input_active = True
+                    active_box = input_box_1
+                    input_box_color = input_color_inactive
+                elif button_2_players.collidepoint(event.pos):
+                    is_two_player = True
+                    input_active = True
+                    active_box = input_box_1
+                    input_box_color = input_color_inactive
+                elif input_box_1.collidepoint(event.pos):
+                    input_active = True
+                    input_box_color = input_color_active
+                    active_box = input_box_1
+                elif is_two_player and input_box_2.collidepoint(event.pos):
+                    input_active = True
+                    input_box_color = input_color_active
+                    active_box = input_box_2
+                else:
+                    if not (button_3x3.collidepoint(event.pos) or button_5x5.collidepoint(event.pos)):
+                        input_active = False
+                        input_box_color = input_color_inactive
+
+                if player_name:
+                    if button_3x3.collidepoint(event.pos) or button_5x5.collidepoint(event.pos):
+                        if button_3x3.collidepoint(event.pos):
+                            GRID_SIZE = 3
+                            CELL_SIZE = 150
+                        else:
+                            GRID_SIZE = 5
+                            CELL_SIZE = 100
+
+                        GRID_START_X = (SCREEN_WIDTH - GRID_SIZE * CELL_SIZE) // 2
+                        GRID_START_Y = (SCREEN_HEIGHT - GRID_SIZE * CELL_SIZE) // 2
+
+                        if is_two_player:
+                            reset_game()
+                            game_states = GAME_SCREEN
+                        else:
+                            game_states = DIFFICULTY_SCREEN
+
+                        input_active = False
+                        input_box_color = input_color_inactive
+
+            if event.type == pygame.KEYDOWN:
+                if input_active:
+                    if event.key == pygame.K_RETURN:
+                        input_active = False
+                        input_box_color = input_color_inactive
+                    elif event.key == pygame.K_BACKSPACE:
+                        if active_box == input_box_1:
+                            player_name = player_name[:-1]
+                        elif active_box == input_box_2:
+                            player_name_2 = player_name_2[:-1]
+                    else:
+                        if active_box == input_box_1 and FONT_MEDIUM.size(player_name + event.unicode)[0] < input_box_1.width - 10:
+                            player_name += event.unicode
+                        elif active_box == input_box_2 and FONT_MEDIUM.size(player_name_2 + event.unicode)[0] < input_box_2.width - 10:
+                            player_name_2 += event.unicode
+
+        elif game_states == DIFFICULTY_SCREEN:
+            button_easy, button_hard = draw_difficulty_screen()
+
+            if event.type == pygame.MOUSEBUTTONDOWN:
+                if button_easy.collidepoint(event.pos):
+                    current_difficulty = "Easy"
+                    reset_game()
+                    game_states = GAME_SCREEN
+                elif button_hard.collidepoint(event.pos):
+                    current_difficulty = "Hard"
+                    reset_game()
+                    game_states = GAME_SCREEN
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                game_states = SETUP_SCREEN
+
+
+        elif game_states == GAME_SCREEN:
+            if current_player == 'X' and event.type == pygame.MOUSEBUTTONDOWN:
+                mouse_x, mouse_y = event.pos
+
+                # Tinh toan o duoc click
+                col = (mouse_x - GRID_START_X) // CELL_SIZE
+                row = (mouse_y - GRID_START_Y) // CELL_SIZE
+
+                if 0 <= row < GRID_SIZE and 0 <= col < GRID_SIZE and board[row][col] == '':
+                    if MOVE_SOUND:
+                        MOVE_SOUND.play()
+                    board[row][col] = 'X'
+                    move_counts += 1
+
+                    if check_win(board, 'X'):
+                        game_result = "Win"
+                        if WIN_SOUND:
+                            WIN_SOUND.play()
+                        if is_two_player:
+                            # 2 players: Player X thắng
+                            save_history(player_name, player_name_2, "Win", move_counts, player_name)
+                        else:
+                            # 1 player: Người chơi thắng AI
+                            save_history(player_name, "Computer", "Win", move_counts, player_name)
+                        game_states = END_SCREEN
+                    elif is_board_full(board):
+                        game_result = "Draw"
+                        if is_two_player:
+                            save_history(player_name, player_name_2, "Draw", move_counts, "")
+                        else:
+                            save_history(player_name, "Computer", "Draw", move_counts, "")
+                        game_states = END_SCREEN
+                    else:
+                        current_player = 'O'
+
+
+            # Xu ly luot choi cua may
+
+            elif current_player == 'O' and is_two_player and event.type == pygame.MOUSEBUTTONDOWN:
+                mouse_x, mouse_y = event.pos
+                col = (mouse_x - GRID_START_X) // CELL_SIZE
+                row = (mouse_y - GRID_START_Y) // CELL_SIZE
+
+                if 0 <= row < GRID_SIZE and 0 <= col < GRID_SIZE and board[row][col] == '':
+                    if MOVE_SOUND:
+                        MOVE_SOUND.play()
+                    board[row][col] = 'O'
+                    move_counts += 1
+
+                    # --- LOGIC KẾT THÚC VÒNG ĐI CỦA O (2P) ---
+
+                    if check_win(board, 'O'):
+                        # Player O thắng trong chế độ 2 players
+                        game_result = "Win"
+                        if WIN_SOUND:
+                            WIN_SOUND.play()
+                        save_history(player_name, player_name_2, "Win", move_counts, player_name_2 if player_name_2 else "Player 2")
+                        game_states = END_SCREEN
+
+                    elif is_board_full(board):
+                        game_result = "Draw"
+                        save_history(player_name, player_name_2, "Draw", move_counts, "")
+                        game_states = END_SCREEN
+                    else:
+                        current_player = 'X'
+
+        elif game_states == END_SCREEN:
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_SPACE:
+                    reset_game()
+                    game_states = GAME_SCREEN
+                elif event.key == pygame.K_r:
+                    game_states = HISTORY_SCREEN
+                elif event.key == pygame.K_s:
+                    reset_game()
+                    game_states = SETUP_SCREEN
+                elif event.key == pygame.K_d and not is_two_player:
+                    game_states = DIFFICULTY_SCREEN
+        elif game_states == HISTORY_SCREEN:
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                game_states = END_SCREEN
+
+    # Xu ly AI move (ngoài event loop)
+    if game_states == GAME_SCREEN and current_player == 'O' and not is_two_player:
+        pygame.time.wait(500)
+        ai_pos = ai_smart_move(board)
+        if ai_pos:
+            r, c = ai_pos
+            if MOVE_SOUND:
+                MOVE_SOUND.play()
+            board[r][c] = 'O'
+            move_counts += 1
+
+            if check_win(board, 'O'):
+                if LOSE_SOUND:
+                    LOSE_SOUND.play()
+                game_result = 'Lose'
+                save_history(player_name, "Computer", "Lose", move_counts, "Computer")
+                game_states = END_SCREEN
+            elif is_board_full(board):
+                game_result = 'Draw'
+                save_history(player_name, "Computer", "Draw", move_counts, "")
+                game_states = END_SCREEN
+            else:
+                current_player = 'X'
+
+    # Ve man hinh
+    if game_states == MENU_SCREEN:
+        draw_menu_screen()
+    elif game_states == SETUP_SCREEN:
+        draw_setup_screen(input_box_color)
+    elif game_states == DIFFICULTY_SCREEN:
+        draw_difficulty_screen()
+    elif game_states == GAME_SCREEN:
+        draw_game_screen(board)
+    elif game_states == END_SCREEN:
+        draw_end_screen()
+    elif game_states == HISTORY_SCREEN:
+        draw_history_screen()
+
+    pygame.display.flip()
+
+pygame.quit()
+sys.exit()
